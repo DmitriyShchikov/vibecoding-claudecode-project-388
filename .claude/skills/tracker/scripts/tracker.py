@@ -36,12 +36,20 @@ TRACKED_URLS = [
 ]
 # --------------------------------------------------------------------------
 
-COLUMNS = ("url", "name", "regular_price", "sale_price", "discount_pct",
-           "has_credit", "availability", "checked_at", "error")
+# Строка прогона: URL плюс три поля контракта extract-price. error нужен, чтобы
+# отличить "цены нет" от "снять не удалось", поэтому он в строке всегда.
+ROW = ("url", "regular_price", "sale_price", "has_credit", "error")
+# Контекст для истории и отчётов — добавляется флагом --full, строку не меняет.
+EXTRA = ("name", "discount_pct", "availability", "checked_at")
 
 
 def load_extract_price():
-    """Подключает соседний скилл extract-price как модуль."""
+    """Подключает соседний скилл extract-price как модуль.
+
+    tracker не разбирает страницы сам: вся логика извлечения цены (адаптеры под
+    магазины, контракт, обработка антибота) живёт в extract-price и вызывается
+    отсюда. Дублировать её здесь нельзя — разъедется контракт.
+    """
     path = (Path(__file__).resolve().parents[2]
             / "extract-price" / "scripts" / "extract_price.py")
     if not path.exists():
@@ -53,14 +61,16 @@ def load_extract_price():
 
 
 def collect(urls, dest, delay):
+    """Обходит список и складывает по строке на товар в таблицу прогона."""
     ep = load_extract_price()
     rows = []
     # dict.fromkeys — дедупликация с сохранением исходного порядка.
     unique = list(dict.fromkeys(urls))
     for i, url in enumerate(unique):
-        row = dict.fromkeys(COLUMNS)
+        row = dict.fromkeys(ROW + EXTRA)
         row["url"] = url
         try:
+            # Один вызов готового скилла на один URL — свой парсинг тут не заводим.
             data = ep.extract(url, dest)
         except ep.ExtractError as e:
             row["error"] = str(e)
@@ -68,8 +78,8 @@ def collect(urls, dest, delay):
             row["error"] = f"{type(e).__name__}: {e}"
         else:
             row.update({k: data.get(k) for k in
-                        ("name", "regular_price", "sale_price", "has_credit",
-                         "availability", "checked_at")})
+                        ("regular_price", "sale_price", "has_credit",
+                         "name", "availability", "checked_at")})
             if row["sale_price"] and row["regular_price"]:
                 row["discount_pct"] = round(
                     100 - row["sale_price"] / row["regular_price"] * 100)
@@ -80,31 +90,39 @@ def collect(urls, dest, delay):
     return rows
 
 
+CREDIT = {True: "да", False: "нет", None: "н/д"}
+
+
 def money(value):
     return f"{value:,.0f} ₽".replace(",", " ") if value is not None else "—"
 
 
-def print_table(rows):
-    header = f"{'товар':<44} {'обычная':>12} {'скидка':>12} {'%':>5} {'рассрочка':>10}"
-    print(header)
-    print("-" * len(header))
+def print_table(rows, full=False):
+    """Одна строка на товар: URL и поля контракта extract-price."""
+    width = max((len(r["url"]) for r in rows), default=40)
+    head = f"{'url':<{width}} {'regular_price':>14} {'sale_price':>12} {'has_credit':>11}"
+    if full:
+        head += f"  {'скидка':>7}  товар"
+    print(head)
+    print("-" * min(len(head), 120))
     for r in rows:
         if r["error"]:
-            print(f"{(r['name'] or r['url'].split('/')[-2])[:44]:<44} "
-                  f"ОШИБКА: {r['error'][:60]}")
+            print(f"{r['url']:<{width}} {'ОШИБКА: ' + r['error'][:52]}")
             continue
-        credit = {True: "да", False: "нет", None: "н/д"}[r["has_credit"]]
-        print(f"{(r['name'] or '')[:44]:<44} {money(r['regular_price']):>12} "
-              f"{money(r['sale_price']):>12} "
-              f"{(str(r['discount_pct']) + '%') if r['discount_pct'] else '—':>5} "
-              f"{credit:>10}")
+        line = (f"{r['url']:<{width}} {money(r['regular_price']):>14} "
+                f"{money(r['sale_price']):>12} "
+                f"{CREDIT[r['has_credit']]:>11}")
+        if full:
+            pct = f"{r['discount_pct']}%" if r["discount_pct"] else "—"
+            line += f"  {pct:>7}  {(r['name'] or '')[:44]}"
+        print(line)
 
     ok = [r for r in rows if not r["error"]]
-    failed = len(rows) - len(ok)
     with_sale = sum(1 for r in ok if r["sale_price"])
-    print("-" * len(header))
-    print(f"собрано: {len(ok)} из {len(rows)} | со скидкой: {with_sale} | "
-          f"ошибок: {failed} | {datetime.now(timezone.utc).isoformat(timespec='seconds')}")
+    print("-" * min(len(head), 120))
+    print(f"строк: {len(rows)} | собрано: {len(ok)} | со скидкой: {with_sale} | "
+          f"ошибок: {len(rows) - len(ok)} | "
+          f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}")
 
 
 def main():
@@ -116,18 +134,22 @@ def main():
                         help="код региона Wildberries (по умолчанию Москва)")
     parser.add_argument("--delay", type=float, default=1.0,
                         help="пауза между запросами в секундах (по умолчанию 1.0)")
+    parser.add_argument("--full", action="store_true",
+                        help="добавить к строке название, размер скидки, наличие и время")
     args = parser.parse_args()
 
     rows = collect(TRACKED_URLS, args.dest, args.delay)
+    columns = ROW + EXTRA if args.full else ROW
+    trimmed = [{k: r[k] for k in columns} for r in rows]
 
     if args.json:
-        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        print(json.dumps(trimmed, ensure_ascii=False, indent=2))
     elif args.csv:
-        writer = csv.DictWriter(sys.stdout, fieldnames=COLUMNS)
+        writer = csv.DictWriter(sys.stdout, fieldnames=columns)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(trimmed)
     else:
-        print_table(rows)
+        print_table(rows, args.full)
 
     ok = sum(1 for r in rows if not r["error"])
     return 0 if ok == len(rows) else (2 if ok == 0 else 1)
