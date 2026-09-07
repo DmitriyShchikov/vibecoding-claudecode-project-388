@@ -78,7 +78,22 @@ onlinetrade и другие) закрыты антиботом и капчей. 
 git clone https://github.com/DmitriyShchikov/vibecoding-claudecode-project-388.git
 cd vibecoding-claudecode-project-388
 pip install -r requirements.txt
+cp .env.example .env   # и подставить свои значения
 ```
+
+### Секреты
+
+Токен бота и адрес чата лежат в `.env` в корне проекта:
+
+```
+TELEGRAM_BOT_TOKEN=...   # выдаёт @BotFather
+TELEGRAM_CHAT_ID=...     # можно узнать у @userinfobot
+```
+
+Файл добавлен в `.gitignore` и в репозиторий не попадает — шаблон без значений
+лежит в `.env.example`. В облачном окружении Claude Code те же переменные лучше
+задать в настройках окружения (**Environment variables** в диалоге cloud
+environment): контейнер эфемерный, и локальный `.env` пропадёт вместе с ним.
 
 Скиллы читаются при старте сессии Claude Code — после клонирования его нужно
 перезапустить в этой папке.

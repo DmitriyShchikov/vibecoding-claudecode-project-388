@@ -2,3 +2,8 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Секреты: токен бота и chat_id
+.env
+.env.*
+!.env.example
