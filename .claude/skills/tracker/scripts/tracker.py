@@ -234,8 +234,8 @@ def run_filename(now=None):
     return (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d") + ".json"
 
 
-def save_run(rows, target):
-    """Кладёт таблицу прогона в <каталог>/YYYY-MM-DD.json и возвращает путь.
+def save_run(rows, target, run_at=None):
+    """Кладёт прогон в <каталог>/YYYY-MM-DD.json и возвращает путь.
 
     Файл готов к публикации в репозиторий tracker-data через GitHub MCP —
     локальный git здесь не задействован.
@@ -244,9 +244,28 @@ def save_run(rows, target):
     if path.is_dir() or not path.suffix:
         path = path / run_filename()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8")
+    path.write_text(json.dumps(wrap_run(rows, run_at), ensure_ascii=False, indent=2)
+                    + "\n", encoding="utf-8")
     return path
+
+
+def wrap_run(rows, run_at=None):
+    """Прогон в файле: время прогона плюс таблица.
+
+    Имя файла даёт только дату, а run_at — точный момент: по нему видно,
+    сколько прошло между прогонами, и какой из двух прогонов за день записан.
+    """
+    return {"run_at": run_at or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "rows": rows}
+
+
+def load_run(path):
+    """Читает файл прогона. Понимает и объект {run_at, rows}, и голый массив:
+    первые прогоны писались до появления времени прогона."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(data, dict):
+        return data.get("rows", []), data.get("run_at")
+    return data, None
 
 
 def money(value):
@@ -309,17 +328,20 @@ def main():
     columns = ROW + EXTRA if args.full else ROW
     trimmed = [{k: r[k] for k in columns} for r in rows]
 
+    run_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     diff = None
+    previous_at = None
     if args.diff:
-        previous = json.loads(Path(args.diff).read_text(encoding="utf-8"))
+        previous, previous_at = load_run(args.diff)
         diff = diff_runs(previous, trimmed)
 
     if args.json and diff is not None:
-        print(json.dumps({"run": trimmed, "diff": diff}, ensure_ascii=False, indent=2))
+        print(json.dumps({"run_at": run_at, "run": trimmed, "diff": diff},
+                         ensure_ascii=False, indent=2))
         return exit_code(rows)
 
     if args.save:
-        path = save_run(trimmed, args.save)
+        path = save_run(trimmed, args.save, run_at)
         print(f"файл прогона: {path}")
         print_table(rows, args.full)
     elif args.json:
@@ -332,6 +354,8 @@ def main():
         print_table(rows, args.full)
 
     if diff is not None and not args.csv:
+        if previous_at:
+            print(f"\nпредыдущий прогон: {previous_at}")
         print_diff(diff, args.all_changes)
     return exit_code(rows)
 

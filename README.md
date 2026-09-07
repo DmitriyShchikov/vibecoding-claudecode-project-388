@@ -153,8 +153,20 @@ https://www.wildberries.ru/catalog/200608562/detail.aspx       124 536 ₽     9
 
 Один прогон — один файл `YYYY-MM-DD.json` в корне репозитория
 [`tracker-data`](https://github.com/DmitriyShchikov/tracker-data). Внутри —
-таблица прогона: объект на товар с полями `url`, `regular_price`, `sale_price`,
-`has_credit`, `error`.
+время прогона и таблица:
+
+```json
+{
+  "run_at": "2026-09-07T16:12:42+00:00",
+  "rows": [
+    {"url": "...", "regular_price": 65750.0, "sale_price": 10546.0,
+     "has_credit": null, "error": null}
+  ]
+}
+```
+
+Имя файла хранит только дату, поэтому точный момент лежит в `run_at`: по нему
+видно, сколько прошло между прогонами и какой из двух прогонов за день записан.
 
 Файл пишется через GitHub MCP, а запись через MCP — это сразу отдельный коммит:
 репозиторий истории не клонируется, локальных `git commit` и `git push` нет.
