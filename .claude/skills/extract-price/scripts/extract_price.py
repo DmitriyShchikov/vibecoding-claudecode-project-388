@@ -50,8 +50,15 @@ def fetch(url, session):
 
 
 def to_number(value):
-    digits = re.sub(r"[^\d]", "", str(value or "").split(",")[0].split(".")[0])
-    return int(digits) if digits else None
+    """'40 374 ₽' -> 40374.0, '1 234,50' -> 1234.5. Разделитель тысяч отбрасывается."""
+    text = re.sub(r"[^\d,.]", "", str(value or "")).replace(",", ".")
+    # Точка отделяет копейки, только если после неё ровно одна-две цифры.
+    m = re.fullmatch(r"(.*?)\.(\d{1,2})", text)
+    whole, frac = (m.group(1), m.group(2)) if m else (text, "")
+    whole = re.sub(r"\D", "", whole)
+    if not whole:
+        return None
+    return float(f"{whole}.{frac}") if frac else float(whole)
 
 
 def iter_jsonld(tree):
@@ -72,6 +79,9 @@ def wildberries(url, session, dest):
         raise ExtractError("не удалось выделить артикул (nm) из ссылки")
     nm = m.group(1)
     payload = None
+    # answered — API ответил корректным JSON, просто без товара. Это отличает
+    # снятый с продажи товар (постоянная ошибка) от недоступного API (можно повторить).
+    answered = False
     # WB версионирует эндпоинт без предупреждения: v2 уже мёртв, живёт v4.
     for version in ("v4", "v3", "v2", "v1"):
         try:
@@ -85,11 +95,14 @@ def wildberries(url, session, dest):
                 products = r.json().get("products") or []
             except json.JSONDecodeError:
                 continue
+            answered = True
             if products:
                 payload = products[0]
                 break
     if payload is None:
-        raise ExtractError(f"card.wb.ru не вернул товар {nm} (проверь dest={dest})", code=2)
+        if answered:
+            raise ExtractError(f"товар {nm} не найден — снят с продажи или неверный артикул")
+        raise ExtractError(f"card.wb.ru недоступен (артикул {nm}, dest={dest})", code=2)
 
     size = next((s for s in payload.get("sizes", []) if s.get("price")), {})
     price = size.get("price", {})
@@ -145,7 +158,7 @@ def generic(url, session):
             "source": host,
             "id": "",
             "name": re.sub(r"\s+", " ", title.text()).strip()[:120] if title else None,
-            "price": float(to_number(price) or 0),
+            "price": to_number(price),
             "price_old": None,
             "currency": (attr('meta[itemprop="priceCurrency"]')
                          or attr('meta[property="product:price:currency"]') or "RUB"),
