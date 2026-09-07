@@ -96,6 +96,41 @@ CREDIT = {True: "да", False: "нет", None: "н/д"}
 # Поля, изменение которых считается изменением товара.
 COMPARED = ("regular_price", "sale_price", "has_credit")
 
+# Пороги значимости — обоснование в KNOWLEDGE.md в корне репозитория.
+# Изменение цены значимо, только если проходит ОБА порога сразу.
+PRICE_MIN_PCT = 1.0    # не меньше 1% от прежней цены
+PRICE_MIN_ABS = 50.0   # и не меньше 50 ₽
+
+
+def effective_price(row):
+    """Цена, которую платит покупатель: со скидкой, если она есть."""
+    sale = row.get("sale_price")
+    return sale if sale is not None else row.get("regular_price")
+
+
+def price_signal(was, now):
+    """Значимо ли изменение эффективной цены. Возвращает сигнал или None."""
+    if was is None or now is None or was == now:
+        return None
+    delta = now - was
+    pct = (delta / was * 100) if was else None
+    # Оба порога обязательны: 1% на дешёвом товаре — копейки, 50 ₽ на дорогом —
+    # шум. Вместе они означают "ощутимо и в деньгах, и в доле цены".
+    if abs(delta) < PRICE_MIN_ABS or (pct is not None and abs(pct) < PRICE_MIN_PCT):
+        return None
+    return {"kind": "price", "from": was, "to": now,
+            "delta": round(delta, 2), "pct": round(pct, 1) if pct is not None else None,
+            "text": f"цена {'выросла' if delta > 0 else 'упала'}"}
+
+
+def credit_signal(was, now):
+    """Появление или пропажа рассрочки. Переходы через null незначимы:
+    null означает "источник не сообщает", а не отсутствие рассрочки."""
+    if was == now or was is None or now is None:
+        return None
+    return {"kind": "credit", "from": was, "to": now,
+            "text": "появилась рассрочка" if now else "рассрочка пропала"}
+
 
 def diff_runs(previous, current):
     """Сравнивает два прогона по URL и возвращает список изменений по товарам.
@@ -110,12 +145,14 @@ def diff_runs(previous, current):
     for url, row in after.items():
         old = before.get(url)
         if old is None:
-            result.append({"url": url, "status": "new", "changes": {}})
+            result.append({"url": url, "status": "new", "changes": {},
+                           "signals": [], "significant": False})
             continue
         # Строку с ошибкой сравнивать нельзя: отсутствие цены здесь означает
         # "не смогли снять", а не "цена исчезла".
         if row.get("error") or old.get("error"):
             result.append({"url": url, "status": "error", "changes": {},
+                           "signals": [], "significant": False,
                            "error": row.get("error") or old.get("error")})
             continue
         changes = {}
@@ -131,43 +168,65 @@ def diff_runs(previous, current):
                 change["delta"] = round(now - was, 2)
                 change["pct"] = round((now - was) / was * 100, 1) if was else None
             changes[field] = change
+        # Значимость считается от эффективной цены, а не от regular_price:
+        # витринная "старая цена" двигается сама по себе (см. KNOWLEDGE.md).
+        signals = [x for x in (price_signal(effective_price(old), effective_price(row)),
+                               credit_signal(old.get("has_credit"), row.get("has_credit")))
+                   if x]
         result.append({"url": url, "status": "changed" if changes else "unchanged",
-                       "changes": changes})
+                       "changes": changes, "signals": signals,
+                       "significant": bool(signals)})
 
     # Товары, которые были в прошлом прогоне и пропали из списка отслеживания.
     for url in before:
         if url not in after:
-            result.append({"url": url, "status": "gone", "changes": {}})
+            result.append({"url": url, "status": "gone", "changes": {},
+                           "signals": [], "significant": False})
     return result
 
 
-def print_diff(diff):
-    """Печатает изменения по каждому товару."""
+def short(url):
+    parts = url.rstrip("/").split("/")
+    return parts[-2] if len(parts) > 2 else url
+
+
+def print_diff(diff, show_all=False):
+    """Печатает изменения. По умолчанию — только значимые (см. KNOWLEDGE.md)."""
     label = {"changed": "изменилось", "unchanged": "без изменений",
              "new": "новый товар", "gone": "убран из списка", "error": "не сверено"}
+    significant = [i for i in diff if i["significant"]]
+    skipped = [i for i in diff if not i["significant"]]
+
     print()
-    print("изменения относительно предыдущего прогона")
+    print("значимые изменения относительно предыдущего прогона")
     print("-" * 70)
-    for item in diff:
-        nm = item["url"].rstrip("/").split("/")[-2] if "/" in item["url"] else item["url"]
-        if item["status"] != "changed":
-            print(f"  {nm:>12}  {label[item['status']]}")
-            continue
-        print(f"  {nm:>12}  {label['changed']}:")
-        for field, c in item["changes"].items():
-            if "delta" in c:
-                sign = "+" if c["delta"] > 0 else ""
-                pct = f" ({sign}{c['pct']}%)" if c.get("pct") is not None else ""
-                print(f"{'':>16}{field}: {money(c['from'])} -> {money(c['to'])}"
-                      f"  {sign}{c['delta']:,.0f} ₽{pct}".replace(",", " "))
+    if not significant:
+        print("  значимых изменений нет")
+    for item in significant:
+        print(f"  {short(item['url'])}")
+        for sig in item["signals"]:
+            if sig["kind"] == "price":
+                sign = "+" if sig["delta"] > 0 else ""
+                print(f"{'':>6}{sig['text']}: {money(sig['from'])} -> {money(sig['to'])}"
+                      f"  {sign}{sig['delta']:,.0f} ₽ ({sign}{sig['pct']}%)".replace(",", " "))
             else:
-                print(f"{'':>16}{field}: {CREDIT.get(c['from'], c['from'])} -> "
-                      f"{CREDIT.get(c['to'], c['to'])}")
-    counts = {}
-    for item in diff:
-        counts[item["status"]] = counts.get(item["status"], 0) + 1
+                print(f"{'':>6}{sig['text']}")
     print("-" * 70)
-    print("  " + " | ".join(f"{label[k]}: {v}" for k, v in counts.items()))
+    below = sum(1 for i in skipped if i["status"] == "changed")
+    tail = f"  значимых: {len(significant)} | отброшено: {len(skipped)}"
+    if below:
+        tail += f" (из них {below} с изменениями ниже порога)"
+    print(tail)
+
+    if show_all and skipped:
+        print()
+        print("отброшено по правилам значимости")
+        print("-" * 70)
+        for item in skipped:
+            note = ", ".join(f"{f}: {c['from']} -> {c['to']}"
+                             for f, c in item["changes"].items())
+            print(f"  {short(item['url']):>14}  {label[item['status']]}"
+                  f"{'  [' + note + ']' if note else ''}")
 
 
 def run_filename(now=None):
@@ -242,6 +301,8 @@ def main():
                         help="записать файл прогона YYYY-MM-DD.json в этот каталог")
     parser.add_argument("--diff", metavar="ФАЙЛ",
                         help="файл предыдущего прогона: сравнить с ним текущий")
+    parser.add_argument("--all-changes", action="store_true",
+                        help="показать и незначимые изменения, отброшенные по правилам")
     args = parser.parse_args()
 
     rows = collect(TRACKED_URLS, args.dest, args.delay)
@@ -271,7 +332,7 @@ def main():
         print_table(rows, args.full)
 
     if diff is not None and not args.csv:
-        print_diff(diff)
+        print_diff(diff, args.all_changes)
     return exit_code(rows)
 
 
