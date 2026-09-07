@@ -7,6 +7,7 @@
 Usage:
     python3 tracker.py [--json | --csv] [--dest -1257786] [--delay 1.0]
     python3 tracker.py --save <каталог>   # файл прогона YYYY-MM-DD.json
+    python3 tracker.py --diff <файл>      # сравнить с предыдущим прогоном
 
 Exit codes: 0 — все строки собраны, 1 — часть строк с ошибкой, 2 — ни одной цены.
 """
@@ -92,6 +93,81 @@ def collect(urls, dest, delay):
 
 
 CREDIT = {True: "да", False: "нет", None: "н/д"}
+# Поля, изменение которых считается изменением товара.
+COMPARED = ("regular_price", "sale_price", "has_credit")
+
+
+def diff_runs(previous, current):
+    """Сравнивает два прогона по URL и возвращает список изменений по товарам.
+
+    previous — таблица прошлого прогона, current — текущего. Товары
+    сопоставляются по url: он стабильный ключ, названия у магазинов плавают.
+    """
+    before = {r["url"]: r for r in previous}
+    after = {r["url"]: r for r in current}
+    result = []
+
+    for url, row in after.items():
+        old = before.get(url)
+        if old is None:
+            result.append({"url": url, "status": "new", "changes": {}})
+            continue
+        # Строку с ошибкой сравнивать нельзя: отсутствие цены здесь означает
+        # "не смогли снять", а не "цена исчезла".
+        if row.get("error") or old.get("error"):
+            result.append({"url": url, "status": "error", "changes": {},
+                           "error": row.get("error") or old.get("error")})
+            continue
+        changes = {}
+        for field in COMPARED:
+            was, now = old.get(field), row.get(field)
+            if was == now:
+                continue
+            change = {"from": was, "to": now}
+            # bool в Python — подкласс int, поэтому его нужно исключить явно:
+            # иначе has_credit false -> true даст "дельту" в рублях.
+            if all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                   for v in (was, now)):
+                change["delta"] = round(now - was, 2)
+                change["pct"] = round((now - was) / was * 100, 1) if was else None
+            changes[field] = change
+        result.append({"url": url, "status": "changed" if changes else "unchanged",
+                       "changes": changes})
+
+    # Товары, которые были в прошлом прогоне и пропали из списка отслеживания.
+    for url in before:
+        if url not in after:
+            result.append({"url": url, "status": "gone", "changes": {}})
+    return result
+
+
+def print_diff(diff):
+    """Печатает изменения по каждому товару."""
+    label = {"changed": "изменилось", "unchanged": "без изменений",
+             "new": "новый товар", "gone": "убран из списка", "error": "не сверено"}
+    print()
+    print("изменения относительно предыдущего прогона")
+    print("-" * 70)
+    for item in diff:
+        nm = item["url"].rstrip("/").split("/")[-2] if "/" in item["url"] else item["url"]
+        if item["status"] != "changed":
+            print(f"  {nm:>12}  {label[item['status']]}")
+            continue
+        print(f"  {nm:>12}  {label['changed']}:")
+        for field, c in item["changes"].items():
+            if "delta" in c:
+                sign = "+" if c["delta"] > 0 else ""
+                pct = f" ({sign}{c['pct']}%)" if c.get("pct") is not None else ""
+                print(f"{'':>16}{field}: {money(c['from'])} -> {money(c['to'])}"
+                      f"  {sign}{c['delta']:,.0f} ₽{pct}".replace(",", " "))
+            else:
+                print(f"{'':>16}{field}: {CREDIT.get(c['from'], c['from'])} -> "
+                      f"{CREDIT.get(c['to'], c['to'])}")
+    counts = {}
+    for item in diff:
+        counts[item["status"]] = counts.get(item["status"], 0) + 1
+    print("-" * 70)
+    print("  " + " | ".join(f"{label[k]}: {v}" for k, v in counts.items()))
 
 
 def run_filename(now=None):
@@ -146,6 +222,11 @@ def print_table(rows, full=False):
           f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}")
 
 
+def exit_code(rows):
+    ok = sum(1 for r in rows if not r["error"])
+    return 0 if ok == len(rows) else (2 if ok == 0 else 1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Обход списка URL и таблица цен")
     output = parser.add_mutually_exclusive_group()
@@ -159,11 +240,22 @@ def main():
                         help="добавить к строке название, размер скидки, наличие и время")
     parser.add_argument("--save", metavar="КАТАЛОГ",
                         help="записать файл прогона YYYY-MM-DD.json в этот каталог")
+    parser.add_argument("--diff", metavar="ФАЙЛ",
+                        help="файл предыдущего прогона: сравнить с ним текущий")
     args = parser.parse_args()
 
     rows = collect(TRACKED_URLS, args.dest, args.delay)
     columns = ROW + EXTRA if args.full else ROW
     trimmed = [{k: r[k] for k in columns} for r in rows]
+
+    diff = None
+    if args.diff:
+        previous = json.loads(Path(args.diff).read_text(encoding="utf-8"))
+        diff = diff_runs(previous, trimmed)
+
+    if args.json and diff is not None:
+        print(json.dumps({"run": trimmed, "diff": diff}, ensure_ascii=False, indent=2))
+        return exit_code(rows)
 
     if args.save:
         path = save_run(trimmed, args.save)
@@ -178,8 +270,9 @@ def main():
     else:
         print_table(rows, args.full)
 
-    ok = sum(1 for r in rows if not r["error"])
-    return 0 if ok == len(rows) else (2 if ok == 0 else 1)
+    if diff is not None and not args.csv:
+        print_diff(diff)
+    return exit_code(rows)
 
 
 if __name__ == "__main__":
