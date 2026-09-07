@@ -6,6 +6,7 @@
 
 Usage:
     python3 tracker.py [--json | --csv] [--dest -1257786] [--delay 1.0]
+    python3 tracker.py --save <каталог>   # файл прогона YYYY-MM-DD.json
 
 Exit codes: 0 — все строки собраны, 1 — часть строк с ошибкой, 2 — ни одной цены.
 """
@@ -93,6 +94,26 @@ def collect(urls, dest, delay):
 CREDIT = {True: "да", False: "нет", None: "н/д"}
 
 
+def run_filename(now=None):
+    """Имя файла прогона: дата прогона в UTC, YYYY-MM-DD.json."""
+    return (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d") + ".json"
+
+
+def save_run(rows, target):
+    """Кладёт таблицу прогона в <каталог>/YYYY-MM-DD.json и возвращает путь.
+
+    Файл готов к публикации в репозиторий tracker-data через GitHub MCP —
+    локальный git здесь не задействован.
+    """
+    path = Path(target)
+    if path.is_dir() or not path.suffix:
+        path = path / run_filename()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8")
+    return path
+
+
 def money(value):
     return f"{value:,.0f} ₽".replace(",", " ") if value is not None else "—"
 
@@ -136,13 +157,19 @@ def main():
                         help="пауза между запросами в секундах (по умолчанию 1.0)")
     parser.add_argument("--full", action="store_true",
                         help="добавить к строке название, размер скидки, наличие и время")
+    parser.add_argument("--save", metavar="КАТАЛОГ",
+                        help="записать файл прогона YYYY-MM-DD.json в этот каталог")
     args = parser.parse_args()
 
     rows = collect(TRACKED_URLS, args.dest, args.delay)
     columns = ROW + EXTRA if args.full else ROW
     trimmed = [{k: r[k] for k in columns} for r in rows]
 
-    if args.json:
+    if args.save:
+        path = save_run(trimmed, args.save)
+        print(f"файл прогона: {path}")
+        print_table(rows, args.full)
+    elif args.json:
         print(json.dumps(trimmed, ensure_ascii=False, indent=2))
     elif args.csv:
         writer = csv.DictWriter(sys.stdout, fieldnames=columns)
