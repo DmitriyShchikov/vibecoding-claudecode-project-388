@@ -237,13 +237,14 @@ NO_CHANGES = "Значимых изменений цен нет"
 
 
 def load_send():
-    """Подключает соседний send.py: доставкой в Telegram занимается он.
+    """Подключает send.py из корня репозитория: доставкой занимается он.
 
     tracker готовит текст, send.py отвечает за токен, чат и Bot API. Своего
     запроса в Telegram здесь нет — иначе секреты и разбор ответа API
     разъедутся по двум местам.
     """
-    path = Path(__file__).resolve().parent / "send.py"
+    # .claude/skills/tracker/scripts/tracker.py -> корень репозитория
+    path = Path(__file__).resolve().parents[4] / "send.py"
     if not path.exists():
         sys.exit(f"ОШИБКА: не найден скрипт отправки ({path})")
     spec = importlib.util.spec_from_file_location("send", path)
@@ -375,6 +376,8 @@ def notify(args, diff, rows):
     try:
         sent = sender.send(text)
     except sender.SendError as e:
+        # Свой код 3: коды send.py (1 — нет настроек, 2 — сеть или API) заняты
+        # здесь под результат обхода, их нельзя пробрасывать наружу как есть.
         print(f"ОШИБКА отправки: {e}", file=sys.stderr)
         return 3
     print(f"отправлено в Telegram: id {', '.join(map(str, sent))}", file=log)
