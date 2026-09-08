@@ -84,4 +84,5 @@ description: >-
 - [x] `extract-price` — извлечение цены товара с одной страницы по URL
 - [x] `tracker` — обход списка URL и сводная таблица цен
 - [ ] `price-history` — хранение истории и расчёт значимости изменения
-- [ ] `notify-telegram` — отправка уведомлений в Telegram
+- [x] отправка уведомлений в Telegram — внутри `tracker`: сводку строит он,
+      доставляет `tracker/scripts/send.py`

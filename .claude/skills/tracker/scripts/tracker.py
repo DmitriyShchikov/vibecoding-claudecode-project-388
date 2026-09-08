@@ -8,8 +8,10 @@ Usage:
     python3 tracker.py [--json | --csv] [--dest -1257786] [--delay 1.0]
     python3 tracker.py --save <каталог>   # файл прогона YYYY-MM-DD.json
     python3 tracker.py --diff <файл>      # сравнить с предыдущим прогоном
+    python3 tracker.py --diff <файл> --notify   # и отправить сводку в Telegram
 
-Exit codes: 0 — все строки собраны, 1 — часть строк с ошибкой, 2 — ни одной цены.
+Exit codes: 0 — все строки собраны, 1 — часть строк с ошибкой, 2 — ни одной цены,
+3 — сводку не удалось отправить в Telegram.
 """
 
 import argparse
@@ -229,6 +231,61 @@ def print_diff(diff, show_all=False):
                   f"{'  [' + note + ']' if note else ''}")
 
 
+# Текст уведомления, когда значимых изменений не нашлось. Молчать нельзя:
+# по тишине не отличить "цены стоят" от "прогон не состоялся".
+NO_CHANGES = "Значимых изменений цен нет"
+
+
+def load_send():
+    """Подключает соседний send.py: доставкой в Telegram занимается он.
+
+    tracker готовит текст, send.py отвечает за токен, чат и Bot API. Своего
+    запроса в Telegram здесь нет — иначе секреты и разбор ответа API
+    разъедутся по двум местам.
+    """
+    path = Path(__file__).resolve().parent / "send.py"
+    if not path.exists():
+        sys.exit(f"ОШИБКА: не найден скрипт отправки ({path})")
+    spec = importlib.util.spec_from_file_location("send", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def signal_line(signal, label):
+    """Одно значимое изменение — одна строка сводки."""
+    if signal["kind"] == "price":
+        up = signal["delta"] > 0
+        sign = "+" if up else "-"
+        pct = f", {sign}{abs(signal['pct'])}%" if signal["pct"] is not None else ""
+        return (f"{'⬆️' if up else '⬇️'} {label}: "
+                f"{money(signal['from'])} → {money(signal['to'])} "
+                f"({sign}{money(abs(signal['delta']))}{pct})")
+    return f"💳 {label}: {signal['text']}"
+
+
+def notify_text(diff, rows=None):
+    """Сводка значимых изменений для отправки: одна строка на изменение.
+
+    Товар подписывается названием, если оно снято, иначе артикулом из URL.
+    Незначимые изменения, новые и пропавшие товары в сводку не попадают —
+    они не повод для сообщения (правила в KNOWLEDGE.md).
+    """
+    names = {r["url"]: r.get("name") for r in (rows or [])}
+    lines = []
+    for item in diff:
+        if not item["significant"]:
+            continue
+        name = (names.get(item["url"]) or "").strip()
+        # Длинные названия магазинов режем: сводка должна читаться с экрана
+        # телефона, а не переносить одно изменение на три строки.
+        label = (name[:47].rstrip() + "…" if len(name) > 48 else name) or short(item["url"])
+        lines.extend(signal_line(s, label) for s in item["signals"])
+    if not lines:
+        return NO_CHANGES
+    return "\n".join([f"Значимые изменения цен: {len(lines)}"] + lines)
+
+
 def run_filename(now=None):
     """Имя файла прогона: дата прогона в UTC, YYYY-MM-DD.json."""
     return (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d") + ".json"
@@ -305,6 +362,25 @@ def exit_code(rows):
     return 0 if ok == len(rows) else (2 if ok == 0 else 1)
 
 
+def notify(args, diff, rows):
+    """Строит сводку и отправляет её через send.py. Возвращает код ошибки или 0."""
+    # Машиночитаемый вывод не засоряем: при --json и --csv сводка идёт в stderr.
+    log = sys.stderr if (args.json or args.csv) else sys.stdout
+    text = notify_text(diff, rows)
+    print("\nсводка для отправки:", text, sep="\n", file=log)
+    if args.dry_run:
+        print("--dry-run: сообщение не отправлено", file=log)
+        return 0
+    sender = load_send()
+    try:
+        sent = sender.send(text)
+    except sender.SendError as e:
+        print(f"ОШИБКА отправки: {e}", file=sys.stderr)
+        return 3
+    print(f"отправлено в Telegram: id {', '.join(map(str, sent))}", file=log)
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Обход списка URL и таблица цен")
     output = parser.add_mutually_exclusive_group()
@@ -322,7 +398,15 @@ def main():
                         help="файл предыдущего прогона: сравнить с ним текущий")
     parser.add_argument("--all-changes", action="store_true",
                         help="показать и незначимые изменения, отброшенные по правилам")
+    parser.add_argument("--notify", action="store_true",
+                        help="отправить сводку значимых изменений в Telegram (нужен --diff)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="с --notify: показать текст сводки, но не отправлять")
     args = parser.parse_args()
+
+    # Проверяем до обхода: незачем десять раз ходить в сеть, чтобы упасть в конце.
+    if args.notify and not args.diff:
+        parser.error("--notify требует --diff: сводка строится из сравнения с прошлым прогоном")
 
     rows = collect(TRACKED_URLS, args.dest, args.delay)
     columns = ROW + EXTRA if args.full else ROW
@@ -335,12 +419,13 @@ def main():
         previous, previous_at = load_run(args.diff)
         diff = diff_runs(previous, trimmed)
 
-    if args.json and diff is not None:
+    # JSON вместе с --diff отдаёт прогон и изменения одним объектом; человеческая
+    # печать изменений в этом режиме не нужна, они уже в выводе.
+    json_diff = args.json and diff is not None
+    if json_diff:
         print(json.dumps({"run_at": run_at, "run": trimmed, "diff": diff},
                          ensure_ascii=False, indent=2))
-        return exit_code(rows)
-
-    if args.save:
+    elif args.save:
         path = save_run(trimmed, args.save, run_at)
         print(f"файл прогона: {path}")
         print_table(rows, args.full)
@@ -353,10 +438,16 @@ def main():
     else:
         print_table(rows, args.full)
 
-    if diff is not None and not args.csv:
+    if diff is not None and not args.csv and not json_diff:
         if previous_at:
             print(f"\nпредыдущий прогон: {previous_at}")
         print_diff(diff, args.all_changes)
+
+    # Отправка последней: сначала пользователь видит прогон, потом уходит сводка.
+    if args.notify:
+        failed = notify(args, diff, rows)
+        if failed:
+            return failed
     return exit_code(rows)
 
 
